@@ -1,0 +1,449 @@
+<html>
+    <head>
+    <!--other script and also external css included over here-->
+	<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+<style>
+#timetable {
+    font-family: "Trebuchet MS", Arial, Helvetica, sans-serif;
+    border-collapse: collapse;
+    width: 100%;
+	margin-top: 50px;
+}
+#timetable td, #timetable th {
+    border: 1px solid #ddd;
+    padding: 4px;
+}
+#timetable tr:nth-child(even){background-color: #f2f2f2;}
+#timetable tr:hover {background-color: #ddd;}
+#timetable thead {
+    padding-top: 12px;
+    padding-bottom: 12px;
+    text-align: left;
+    background-color: #4CAF50;
+    color: white;
+}
+body {font-family: Arial, Helvetica, sans-serif;},
+form {border: 3px solid #f1f1f1;}
+input[type=text], input[type=password], input[type=checkbox] {
+    padding: 12px 20px;
+    margin: 8px 0;
+    display: inline-block;
+    border: 1px solid #ccc;
+    box-sizing: border-box;
+}
+button {
+    background-color: #4CAF50;
+    color: white;
+    padding: 14px 20px;
+    margin: 8px 0;
+    border: none;
+    cursor: pointer;
+    width: 100%;
+}
+button:hover {
+    opacity: 0.8;
+}
+#loginform {
+	border-width: 2px;
+	border-color: #4caf50;
+	padding: 20px;
+	border-style: solid;
+	display: table-cell;
+	float: left;
+	height:30%
+}
+#scrumform {
+	border-width: 2px;
+	border-color: #4caf50;
+	padding: 20px;
+	border-style: solid;
+	display: table-cell;
+	float: right;
+	height:30%
+}
+#forms{
+
+    display:  inline-block;
+    width:  100%;
+}
+</style>
+
+</head>
+<body>
+<div id="forms">
+	<div id="loginform" align="left" >
+		<input type="text" name="user" id='usrfield' placeholder="Enter Username" autofocus><br>
+		<input type="password" name="password" id='passfield' placeholder="Enter Password"><br>
+		<button value="Sign In" id='submit'> Sign In</button><br />
+		<button value="Reload" id='reload'> Reload</button><br />
+		<button value="Export to Excel" id='export' onclick="tableToExcel('timetable', 'W3C Example Table')" > Export</button>
+	</div>
+	<div id="scrumform" align="right" >
+		<input type="text" name="scrumteam" id='scrumteam' placeholder="Scrum Team"><br/>
+		<input type="text" name="sprint" id='sprint' placeholder="Sprint Number"><br/>
+		  Include Spills : <input type="checkbox" id="spilledtasks" title="spilled sub tasks from the previous spring will be calculated/shown if this checked"><br/>
+		  <button value="Update" id='update'>Update</button><br />
+	</div>
+</div>
+<script>
+// ==UserScript==
+// @name         Time Allocation Data 
+// @version      0.1
+// @description  Time Allocation 
+// @author       Kalpa Gamage
+// @grant        GM_xmlhttpRequest
+// @noframes
+// ==/UserScript==
+var userName="";
+var password = "";
+var basicAuthString = "";
+var tableContents = [];	
+var jiraRestAPI="https://jira.millenniumit.com/rest/api/2/search?jql=";
+var jqlQuery="";
+var scrumTeamMembers=[];
+var scrumTimeOffData=[];
+var scrumTeam = "Vega";
+var currentSprint = 12257;
+var considerCarriedForwardTasks = false;
+
+document.getElementById("scrumteam").value = scrumTeam;
+document.getElementById("sprint").value = currentSprint;
+
+document.getElementById("submit").addEventListener("click", function () {
+ 	if(document.getElementById("timetable")){
+		document.body.removeChild(document.getElementById("timetable"));
+	}
+	userName= document.getElementById("usrfield").value;
+	password = document.getElementById("passfield").value;
+	if(userName == "" || password == ""){
+		alert("Username or Password Empty");
+		return;
+	}
+	basicAuthString = "Basic " + btoa(userName + ":" + password);
+	tableContents = [];
+	if(getScrumMetaData() == true){
+		requestTimeAllocationData();
+	}
+});
+
+document.getElementById("spilledtasks").addEventListener("change", function () {
+ 	considerCarriedForwardTasks = this.checked;
+});
+
+document.getElementById("reload").addEventListener("click", function () {
+ 	reloadTable();
+});
+
+document.getElementById("update").addEventListener("click", function () {
+ 	if(document.getElementById("scrumteam").value !=""){
+		scrumTeam = document.getElementById("scrumteam").value;	
+		alert("Scrum Team Updated As :" +scrumTeam);
+		document.getElementById("scrumteam").value = scrumTeam;
+	}
+	
+	if (document.getElementById("sprint").value != ""){
+		currentSprint = document.getElementById("sprint").value;
+		alert("Sprint Updated As :" + currentSprint);
+		document.getElementById("sprint").value = currentSprint;
+	}
+});
+
+function reloadTable(){
+	if(document.getElementById("timetable")){
+		document.body.removeChild(document.getElementById("timetable"));
+	}
+	tableContents = [];
+	if(getScrumMetaData() == true){
+		requestTimeAllocationData();
+	}
+}
+
+/*sprint meta data format in the given task*/
+//||Member||Public Holidays ||Scrum Meetings||Other Time Off ||Leaves||\r\n|
+//[~amithad]|8|8|0|8|\r\n|
+//[~tharushap]|8|8|0|8|\r\n|
+//[~gihanwi]|8|8|0|8|\r\n|
+//[~asirif]|8|8|0|16|\r\n|
+//[~v_chathurangahk]|8|8|0|16|\r\n|
+//[~kanishkaw]|8|8|0|24|
+function getScrumMetaData(){
+	scrumTimeOffData = [];
+	var xhr = new XMLHttpRequest();
+	jqlQuery="summary ~ \"Scrum Meta Data\" and cf[16117] ="+GetScrumTeam()+" and Sprint =" +GetCurrentSprint();
+	JSResponse = getRestAPIData(xhr, jqlQuery, basicAuthString);
+
+	if(!JSResponse)
+		return false;
+		
+	if( JSResponse["total"] == 0){
+		populateTimeOffDataManually();
+		return true;
+	}
+		
+	var description = JSResponse["issues"][0]["fields"]["description"];
+	var timeEntries = description.split("\r\n").filter(row => !row.startsWith('||')); 
+	var regex = /(?<=\[~)(.*?)(?=\])/g;
+	scrumTeamMembers = description.match(regex);
+	
+	for(var i=0; i< timeEntries.length; i++){
+		var timedata = timeEntries[i].split('|');
+		var member = timedata[1].match(/(?<=\[~)(.*?)(?=\])/g);//returns an array 
+		var timerow = {name:member[0].toLowerCase(), publicholidays:timedata[2], scrummeetings:timedata[3], othertimeoff:timedata[4], leaves:timedata[5]};//string begins with a '|' hence the ind
+		scrumTimeOffData.push(timerow);
+	} 
+	console.log("time entries : "); console.log(scrumTimeOffData);
+	return true;
+}
+
+function requestTimeAllocationData(){
+	var JSResponse ="";
+	var xhr = new XMLHttpRequest();
+		
+	for(var i=0;i<scrumTimeOffData.length;i++){
+		jqlQuery="issueFunction in aggregateExpression(\"Total Estimate for all Issues\", \"originalEstimate.sum()\") and issueFunction in subtasksOf(\"Sprint = "+
+	    +GetCurrentSprint()+ " and cf[16117] = " +GetScrumTeam()+ "\") and resolution in(Unresolved,Fixed) and status not in(Resolved,Closed) and assignee= " +scrumTimeOffData[i]['name'];
+		JSResponse = getRestAPIData(xhr, jqlQuery, basicAuthString);
+		console.log(JSResponse);
+		
+		if(JSResponse==null){
+			alert("bad request. please login again");
+			break;
+		}
+		if(!AggregateResults( scrumTimeOffData[i]['name'], JSResponse)){
+			console.error("something is wrong with the JQL : (" + jqlQuery + ")");
+			continue;
+		}
+	}
+	createTable(tableContents);
+}
+
+function getRestAPIData(requestObject, jql, authString){
+	requestObject.open('Get', jiraRestAPI+jqlQuery, false);   
+	setRequestHeaderProperties(requestObject, authString, "application/json");
+	requestObject.send();
+
+	if (requestObject.status === 200) { //STATUS_OK 
+		return JSON.parse(requestObject.responseText);
+	} 
+	else{
+		if(requestObject.status == 401 || requestObject.status == 403 ){
+			alert("Authentication Error. Please try again");
+		}
+		console.error("server returned error : "+requestObject.status + "  Reason = "+requestObject.statusText);
+		console.log("jql = " + jqlQuery);
+		return null;
+	}
+}
+
+function setRequestHeaderProperties( requestObject, authString, contentType){
+	requestObject.setRequestHeader("Authorization", authString);
+	requestObject.setRequestHeader("Content-type", contentType);
+}
+
+function AggregateResults( user, JSResponse){
+ 	
+	var timeoffdata = scrumTimeOffData.find(member => member['name'] == user);
+	
+	if(JSResponse["total"] == 0){
+		tableContents.push(createDummyRow(user, timeoffdata));	
+		return false;
+	}
+	
+	var estimate=0;
+	var totalEstimate=0;
+	var ids="";
+	var timeoffs=0;
+	var key =";"
+	var parenttasks="";
+	var progress= 0;
+	var timelogdetails="";
+	var userName=JSResponse["issues"][0]["fields"]["assignee"]["displayName"];
+	var userId=JSResponse["issues"][0]["fields"]["assignee"]["key"];
+	
+	for(var i=0; i < JSResponse["total"]; i++){
+		estimate=JSResponse["issues"][i]["fields"]["aggregatetimeoriginalestimate"];
+		progress +=(JSResponse["issues"][i]["fields"]["progress"]["progress"]);
+		key=JSResponse["issues"][i]["key"];
+		parenttasks+=JSResponse["issues"][i]["fields"]["parent"]["key"]+",";
+		ids+=key+",";
+		
+		if(considerCarriedForwardTasks == true){
+			if(isSpilledSubTask(JSResponse["issues"][i]) == true){
+				estimate =  estimate - JSResponse["issues"][i]["fields"]["aggregatetimespent"];
+				console.log("originalEstimate = "+JSResponse["issues"][i]["fields"]["aggregatetimeoriginalestimate"] + " timespent = " +JSResponse["issues"][i]["fields"]["aggregatetimespent"] 
+				+ "given time = " + estimate);
+			}
+		}
+		totalEstimate+=estimate;
+	}
+			
+	var totaltimeoffs = parseInt(timeoffdata['leaves'])+parseInt(timeoffdata['othertimeoff'])+parseInt(timeoffdata['publicholidays'])+parseInt(timeoffdata['scrummeetings']);
+	var allocatedHours = totalEstimate/3600;
+	ids = ids.slice(0, -1);//remove appending ',' at the end.
+	parenttasks = parenttasks.slice(0, -1);//remove appending ',' at the end.
+	var jqlForSubtasks= "key in("+ids+")";
+	var jqlForParentIssues="key in(" +parenttasks+")";
+	var diff = getSprintAllocatableTime()-totaltimeoffs-allocatedHours; 
+	
+	if( progress > 0 && allocatedHours > 0){
+		timelogdetails = (((progress/3600)/allocatedHours)*100).toFixed(0)+  "%   ("+(progress/3600) + " Hrs)" ;	
+	}
+	
+	var tablerow = {name:userName, leaves:timeoffdata['leaves'], othertimeoff:timeoffdata['othertimeoff'],publicholidays:timeoffdata['publicholidays'],
+	totaltimeoff:totaltimeoffs, scrummeetings:timeoffdata['scrummeetings'], hours:allocatedHours, deficit:diff, subtasks:jqlForSubtasks, parenttasks:jqlForParentIssues, timelog:timelogdetails};
+	tableContents.push(tablerow);
+	
+	return true;
+}
+
+function createDummyRow(name, timeoffdata ){
+	var totalTime = parseInt(timeoffdata['leaves'])+parseInt(timeoffdata['othertimeoff'])+parseInt(timeoffdata['publicholidays'])+parseInt(timeoffdata['scrummeetings']);
+	return {name:name, leaves:timeoffdata['leaves'], othertimeoff:timeoffdata['othertimeoff'],publicholidays:timeoffdata['publicholidays'],
+		totaltimeoff:totalTime,
+		scrummeetings:timeoffdata['scrummeetings'], hours:0, deficit:getSprintAllocatableTime() - totalTime, subtasks:"no subtaks yet", parenttasks:"no parent tasks yet", timelog:""};
+}
+
+function isSpilledSubTask(subtask){ 
+	if(subtask["fields"]["customfield_14405"].length > 1){ //customfield_14405 = custom field for sprint
+			return true; // if number of sprints is more than one it means that the subtask is a carried forwarded subtask
+	}
+	return false;
+}
+
+function createTable(tableContents){
+	var table = document.createElement('table');
+	table.setAttribute('id', 'timetable');
+	table.setAttribute('border', 1);
+	createTableHeaders(table);
+	var data, row,col,col2,col3,col4,ids,subtasksLabl, deficitLabl, parentTasksLbl;	
+	
+	for(var i=0; i<tableContents.length; i++){
+		data=tableContents[i];
+		row=document.createElement('tr');   
+		col1=document.createElement('td');
+		col2=document.createElement('td');
+		col3=document.createElement('td');
+		col4=document.createElement('td');	
+		col5=document.createElement('td');	
+		col6=document.createElement('td');	
+		col7=document.createElement('td');	
+		col8=document.createElement('td');	
+		col9=document.createElement('td');	
+		col10=document.createElement('td');	
+		
+		ids = data['subtasks'];
+		subtasksLabl = document.createElement('a');
+		subtasksLabl.href = "https://jira.millenniumit.com/issues/?jql="+"("+ids+")";
+		subtasksLabl.title = ids;
+		subtasksLabl.setAttribute('target', '_blank');
+		//issueKeysLbl.appendChild(document.createTextNode(ids));	
+		subtasksLabl.appendChild(document.createTextNode("Click to Show"));	
+		parentTasksLbl = document.createElement('a');
+		parentTasksLbl.href="https://jira.millenniumit.com/issues/?jql="+"("+data['parenttasks']+")";
+		parentTasksLbl.setAttribute('target', '_blank');
+		parentTasksLbl.appendChild(document.createTextNode("Click to Show"));	
+		
+		col1.appendChild(document.createTextNode(data['name']));
+		col2.appendChild(document.createTextNode(data['leaves']));
+		col3.appendChild(document.createTextNode(data['othertimeoff']));
+		col4.appendChild(document.createTextNode(data['publicholidays']));
+		col5.appendChild(document.createTextNode(data['scrummeetings']));
+		col6.appendChild(document.createTextNode(data['hours']));
+		deficitLabl = data['deficit'];
+		col7.appendChild(document.createTextNode(deficitLabl));
+		col7.setAttribute('bgcolor',checkDeficitThreshold(deficitLabl));	
+		
+		col8.appendChild(subtasksLabl);
+		col9.appendChild(parentTasksLbl);
+		col10.appendChild(document.createTextNode(data['timelog']));
+		row.appendChild(col1);
+		row.appendChild(col2);
+		row.appendChild(col3);
+		row.appendChild(col4);
+		row.appendChild(col5);
+		row.appendChild(col6);
+		row.appendChild(col7);
+		row.appendChild(col8);
+		row.appendChild(col9);
+		row.appendChild(col10);
+		table.appendChild(row);
+	}
+	document.body.appendChild(table);
+}
+
+function createTableHeaders(table){
+	if(tableContents.length == 0)
+		return;
+	
+	var header = table.createTHead();
+    var headrow = header.insertRow(0);
+    
+	headrow.insertCell(0).innerHTML = "<b>Name</b>";
+	headrow.insertCell(1).innerHTML = "<b>Leaves</b>";
+	headrow.insertCell(2).innerHTML = "<b>Other Allocations<br>/Meetings</b>";
+	headrow.insertCell(3).innerHTML = "<b>Public Holidays</b>";
+	headrow.insertCell(4).innerHTML = "<b>Scrum Meetings</b>";
+	headrow.insertCell(5).innerHTML = "<b>Allocated</b>";
+	headrow.insertCell(6).innerHTML = "<b>Deficit</b>";
+	headrow.insertCell(7).innerHTML = "<b>SubTasks</b>";
+	headrow.insertCell(8).innerHTML = "<b>Parent Tasks</b>";
+	headrow.insertCell(9).innerHTML = "<b>Time Logged</b>";
+}	
+	
+function GetCurrentSprint(){ //TODO: make a jira rest call to get the current sprint.
+	return currentSprint;
+}
+
+function GetScrumTeam(){
+	return scrumTeam;
+}
+	
+function getSprintAllocatableTime(){
+	var allocationPercentage = 1; //currently on 100% allocation 
+	var weeks = 2;
+	var workinghours = 8;
+	return 5*weeks*workinghours*allocationPercentage;//no of days X weeks X workinghours X allocation
+}
+
+function checkDeficitThreshold(deficit){
+	if(deficit > 4){
+		return "#ffcc00";
+	}
+	if(deficit < 0){
+		return "#ff6666";
+	}
+	return "#00cc00";
+}	
+
+function populateTimeOffDataManually(){
+	var rawFile = new XMLHttpRequest();
+    rawFile.open("GET", "ScrumTimeOffData.txt", false);
+    rawFile.onreadystatechange = function ()
+    {
+        if(rawFile.readyState === 4)
+        {
+            if(rawFile.status === 200 || rawFile.status == 0)
+            {
+                scrumTimeOffData = JSON.parse(rawFile.responseText);	
+				console.log("manually populated scrum data from file = " +scrumTimeOffData);
+            }
+        }
+    }
+    rawFile.send(null);
+}
+
+var tableToExcel = (function() {
+  var uri = 'data:application/vnd.ms-excel;base64,'
+    , template = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>{worksheet}</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]></head><body><table>{table}</table></body></html>'
+    , base64 = function(s) { return window.btoa(unescape(encodeURIComponent(s))) }
+    , format = function(s, c) { return s.replace(/{(\w+)}/g, function(m, p) { return c[p]; }) }
+  return function(table, name) {
+    if (!table.nodeType) table = document.getElementById(table)
+    var ctx = {worksheet: name || 'Worksheet', table: table.innerHTML}
+    window.location.href = uri + base64(format(template, ctx))
+  }
+})()
+
+</script>
+</body>
+</html>
